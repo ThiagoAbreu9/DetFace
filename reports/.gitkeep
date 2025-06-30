@@ -1,0 +1,3 @@
+# Esta pasta armazena os relatórios gerados
+# Relatórios são salvos em formatos CSV e PDF
+# Nomenclatura: relatorio_{tipo}_{timestamp}.{extensao}

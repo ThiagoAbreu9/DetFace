@@ -1,0 +1,40 @@
+{
+    "max_users": 10,
+    "recognition_threshold": 0.6,
+    "camera_index": 0,
+    "auto_backup": true,
+    "backup_interval_hours": 24,
+    "log_level": "INFO",
+    "system_name": "DETFACE",
+    "version": "1.0.0",
+    "language": "pt-BR",
+    "timezone": "America/Sao_Paulo",
+    "recognition_settings": {
+        "min_face_size": 50,
+        "max_faces_per_frame": 5,
+        "recognition_cooldown_seconds": 5,
+        "frame_skip": 2,
+        "camera_resolution": {
+            "width": 640,
+            "height": 480
+        }
+    },
+    "security_settings": {
+        "max_failed_attempts": 3,
+        "lockout_duration_minutes": 15,
+        "require_confirmation_for_deletion": true,
+        "auto_backup_on_user_changes": true
+    },
+    "report_settings": {
+        "default_format": "both",
+        "max_records_per_pdf": 50,
+        "include_photos_in_reports": false,
+        "auto_generate_monthly": false
+    },
+    "ui_settings": {
+        "show_fps": false,
+        "show_confidence": false,
+        "window_title": "DETFACE - Sistema de Reconhecimento Facial",
+        "display_help": true
+    }
+}
