@@ -1,0 +1,3 @@
+# Esta pasta armazena as imagens dos rostos cadastrados
+# Cada usuário deve ter uma imagem no formato: {user_id}.jpg
+# Formatos suportados: .jpg, .jpeg, .png, .bmp
