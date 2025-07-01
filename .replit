@@ -20,6 +20,10 @@ args = "DETFACE System"
 task = "workflow.run"
 args = "Web Interface"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Desktop App"
+
 [[workflows.workflow]]
 name = "DETFACE System"
 author = "agent"
@@ -36,6 +40,14 @@ author = "agent"
 task = "shell.exec"
 args = "python web_camera.py"
 waitForPort = 5000
+
+[[workflows.workflow]]
+name = "Desktop App"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python detface_desktop.py"
 
 [[ports]]
 localPort = 5000
