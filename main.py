@@ -95,17 +95,47 @@ class DetfaceSystem:
         
     def start_recognition(self):
         """Inicia o processo de reconhecimento facial"""
-        print("\n🚀 Iniciando sistema de reconhecimento facial...")
-        print("💡 Pressione 'q' para parar o reconhecimento")
-        print("💡 Pressione 'SPACE' para capturar manualmente")
+        if self.config.get("demo_mode", False):
+            self.demo_recognition()
+        else:
+            print("\n🚀 Iniciando sistema de reconhecimento facial...")
+            print("💡 Pressione 'q' para parar o reconhecimento")
+            print("💡 Pressione 'SPACE' para capturar manualmente")
+            
+            try:
+                self.face_detector.start_recognition()
+                self.log_event("Sistema de reconhecimento iniciado")
+            except Exception as e:
+                error_msg = f"Erro ao iniciar reconhecimento: {str(e)}"
+                self.log_event(error_msg, "ERROR")
+                print(f"❌ {error_msg}")
+    
+    def demo_recognition(self):
+        """Simula o reconhecimento facial em modo demo"""
+        print("\n🎮 MODO DEMO - Simulação de Reconhecimento Facial")
+        print("-"*50)
+        print("Este é um modo de demonstração que simula o reconhecimento facial.")
+        print("Em um ambiente real com câmera, o sistema detectaria e reconheceria rostos automaticamente.")
         
-        try:
-            self.face_detector.start_recognition()
-            self.log_event("Sistema de reconhecimento iniciado")
-        except Exception as e:
-            error_msg = f"Erro ao iniciar reconhecimento: {str(e)}"
-            self.log_event(error_msg, "ERROR")
-            print(f"❌ {error_msg}")
+        # Simular alguns reconhecimentos
+        users = self.user_manager.get_all_users()
+        if users:
+            print(f"\n📊 Usuários cadastrados: {len(users)}")
+            for i, user in enumerate(users[:3]):  # Mostrar apenas os primeiros 3
+                print(f"  {i+1}. {user['name']} (ID: {user['id']})")
+            
+            print("\n🎯 Simulando reconhecimentos...")
+            import random
+            for i in range(3):
+                user = random.choice(users)
+                # Simular registro de presença
+                self.face_detector.register_attendance(user['id'], user['name'])
+                time.sleep(1)  # Pausa para visualizar
+                
+            print("\n✅ Simulação concluída!")
+        else:
+            print("\n❌ Nenhum usuário cadastrado para simular reconhecimento.")
+            print("Cadastre alguns usuários primeiro usando a opção 2 do menu.")
             
     def register_new_user(self):
         """Registra um novo usuário no sistema"""
@@ -128,21 +158,34 @@ class DetfaceSystem:
         if not user_id:
             user_id = name.lower().replace(" ", "_")
             
-        print(f"\n📸 Posicione-se na frente da câmera...")
-        print("💡 Pressione SPACE para capturar ou 'q' para cancelar")
-        
-        try:
-            success = self.face_detector.capture_user_face(name, user_id)
-            if success:
+        if self.config.get("demo_mode", False):
+            # Modo demo - não precisa capturar foto
+            print(f"\n🎮 MODO DEMO: Cadastrando usuário sem captura de foto...")
+            try:
                 self.user_manager.add_user(name, user_id)
-                print(f"✅ Usuário '{name}' cadastrado com sucesso!")
-                self.log_event(f"Novo usuário cadastrado: {name} (ID: {user_id})")
-            else:
-                print("❌ Falha ao capturar imagem do usuário")
-        except Exception as e:
-            error_msg = f"Erro no cadastro: {str(e)}"
-            self.log_event(error_msg, "ERROR")
-            print(f"❌ {error_msg}")
+                print(f"✅ Usuário '{name}' cadastrado com sucesso no modo demo!")
+                self.log_event(f"Novo usuário cadastrado (modo demo): {name} (ID: {user_id})")
+            except Exception as e:
+                error_msg = f"Erro no cadastro: {str(e)}"
+                self.log_event(error_msg, "ERROR")
+                print(f"❌ {error_msg}")
+        else:
+            # Modo normal - capturar foto
+            print(f"\n📸 Posicione-se na frente da câmera...")
+            print("💡 Pressione SPACE para capturar ou 'q' para cancelar")
+            
+            try:
+                success = self.face_detector.capture_user_face(name, user_id)
+                if success:
+                    self.user_manager.add_user(name, user_id)
+                    print(f"✅ Usuário '{name}' cadastrado com sucesso!")
+                    self.log_event(f"Novo usuário cadastrado: {name} (ID: {user_id})")
+                else:
+                    print("❌ Falha ao capturar imagem do usuário")
+            except Exception as e:
+                error_msg = f"Erro no cadastro: {str(e)}"
+                self.log_event(error_msg, "ERROR")
+                print(f"❌ {error_msg}")
             
     def list_users(self):
         """Lista todos os usuários cadastrados"""
@@ -335,8 +378,11 @@ class DetfaceSystem:
         
         # Verificar dependências
         if not self.face_detector.check_camera():
-            print("❌ Câmera não detectada! Verifique a conexão.")
-            return
+            print("⚠️ Câmera não detectada! Executando em modo DEMO.")
+            print("🎮 No modo demo, você pode testar todas as funcionalidades exceto o reconhecimento em tempo real.")
+            self.config["demo_mode"] = True
+        else:
+            self.config["demo_mode"] = False
             
         self.running = True
         

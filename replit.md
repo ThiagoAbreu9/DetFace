@@ -93,7 +93,26 @@ The system follows a modular architecture with clear separation of concerns:
 
 ## Changelog
 
-- June 30, 2025. Initial setup
+- July 1, 2025: Fixed dependency issues by replacing face-recognition library with OpenCV-only solution
+- July 1, 2025: Added demo mode for environments without camera access
+- July 1, 2025: Created web interface for better camera access in browser environments
+- June 30, 2025: Initial setup
+
+## Recent Changes
+
+### Camera Access Solution (July 1, 2025)
+- **Problem Solved**: Original system failed due to face-recognition library compilation issues
+- **Solution**: Replaced with OpenCV-only approach using Haar cascades and histogram-based features
+- **New Features**: 
+  - Web interface at port 5000 for browser-based camera access
+  - Demo mode for testing without camera
+  - Improved camera detection with multiple backends
+- **User Impact**: System now works in Replit environment and can access notebook cameras through browser
+
+### Dual Interface System
+- **Terminal Interface**: Original command-line interface with demo mode
+- **Web Interface**: Browser-based interface with real camera access
+- **Port Configuration**: Web interface runs on port 5000
 
 ## User Preferences
 
