@@ -6,18 +6,17 @@
         "active": true,
         "last_seen": null,
         "total_entries": 0,
-        "total_exits": 0,
-        "modified_date": "2025-07-14T22:14:46.926963"
+        "total_exits": 0
     },
     "2": {
         "id": "2",
-        "name": "Ayrton Finicelli",
-        "registered_date": "2025-07-14T22:23:57.525318",
+        "name": "Ayrton",
+        "registered_date": "2025-07-14T20:39:42.120203",
         "active": true,
         "last_seen": null,
         "total_entries": 0,
         "total_exits": 0,
-        "department": "Ali oh",
+        "department": "Ali",
         "position": "Dev"
     }
 }
