@@ -12,6 +12,8 @@ import datetime
 import csv
 from pathlib import Path
 import time
+import threading
+from collections import deque
 from sklearn.metrics.pairwise import cosine_similarity
 
 class FaceDetector:
@@ -23,14 +25,153 @@ class FaceDetector:
         self.known_face_names = []
         self.known_face_ids = []
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-        self.recognition_threshold = 0.75
+        
+        # Carregar configurações
+        self.load_config()
+        
         self.last_recognition_time = {}
-        self.recognition_cooldown = 5  # segundos entre reconhecimentos do mesmo usuário
         self.camera_index = 0
         self.camera_backend = None
         
+        # Variáveis para thread de processamento
+        self.processing_thread = None
+        self.stop_processing = False
+        self.frame_queue = deque(maxlen=3)  # Buffer de frames
+        self.processed_faces = []
+        self.processing_lock = threading.Lock()
+        
         # Carregar rostos conhecidos
         self.load_known_faces()
+        
+    def process_frames_thread(self):
+        """Thread separada para processar frames e detectar faces"""
+        last_processing_time = time.time()
+        
+        while not self.stop_processing:
+            try:
+                # Aguardar frame disponível
+                if len(self.frame_queue) == 0:
+                    time.sleep(0.01)  # 10ms
+                    continue
+                
+                current_time = time.time()
+                
+                # Processar apenas em intervalos regulares
+                if current_time - last_processing_time >= self.processing_interval:
+                    # Pegar frame mais recente
+                    frame = self.frame_queue[-1]
+                    
+                    # Detectar faces
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    faces = self.face_cascade.detectMultiScale(gray, self.face_detection_scale, self.face_detection_min_neighbors)
+                    
+                    # Processar cada face detectada
+                    processed_faces = []
+                    for (x, y, w, h) in faces:
+                        face_roi = gray[y:y+h, x:x+w]
+                        
+                        # Extrair características da face
+                        features = self.extract_face_features(face_roi)
+                        
+                        if features is not None and len(self.known_face_features) > 0:
+                            # Comparar com faces conhecidas
+                            similarities = []
+                            for known_features in self.known_face_features:
+                                similarity = cosine_similarity([features], [known_features])[0][0]
+                                similarities.append(similarity)
+                            
+                            # Encontrar melhor correspondência
+                            best_match_idx = np.argmax(similarities)
+                            best_similarity = similarities[best_match_idx]
+                            
+                            if best_similarity > self.recognition_threshold:
+                                name = self.known_face_names[best_match_idx]
+                                user_id = self.known_face_ids[best_match_idx]
+                                
+                                # Verificar cooldown
+                                if (user_id not in self.last_recognition_time or 
+                                    current_time - self.last_recognition_time[user_id] > self.recognition_cooldown):
+                                    
+                                    # Registrar presença
+                                    self.register_attendance(user_id, name)
+                                    self.last_recognition_time[user_id] = current_time
+                                
+                                # Armazenar dados da face
+                                processed_faces.append({
+                                    'bbox': (x, y, w, h),
+                                    'name': name,
+                                    'similarity': best_similarity,
+                                    'color': (0, 255, 0),
+                                    'type': 'known'
+                                })
+                            else:
+                                # Face não reconhecida
+                                processed_faces.append({
+                                    'bbox': (x, y, w, h),
+                                    'name': 'Desconhecido',
+                                    'similarity': best_similarity,
+                                    'color': (0, 0, 255),
+                                    'type': 'unknown'
+                                })
+                        else:
+                            # Só mostrar retângulo
+                            processed_faces.append({
+                                'bbox': (x, y, w, h),
+                                'name': '',
+                                'similarity': 0,
+                                'color': (255, 0, 0),
+                                'type': 'detected'
+                            })
+                    
+                    # Atualizar faces processadas
+                    with self.processing_lock:
+                        self.processed_faces = processed_faces
+                    
+                    last_processing_time = current_time
+                else:
+                    time.sleep(0.01)  # 10ms
+                    
+            except Exception as e:
+                print(f"Erro na thread de processamento: {e}")
+                time.sleep(0.1)
+        
+    def load_config(self):
+        """Carrega configurações do arquivo config.json"""
+        try:
+            with open('config.json', 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                
+            # Configurações de reconhecimento
+            self.recognition_threshold = config.get('recognition_threshold', 0.75)
+            self.recognition_cooldown = config.get('performance', {}).get('recognition_cooldown', 5)
+            
+            # Configurações de câmera
+            camera_settings = config.get('camera_settings', {})
+            self.camera_fps = camera_settings.get('fps', 30)
+            self.camera_width = camera_settings.get('width', 640)
+            self.camera_height = camera_settings.get('height', 480)
+            self.camera_buffer_size = camera_settings.get('buffer_size', 1)
+            self.camera_auto_exposure = camera_settings.get('auto_exposure', 0.25)
+            
+            # Configurações de performance
+            performance_settings = config.get('performance', {})
+            self.processing_interval = performance_settings.get('processing_interval', 0.1)
+            self.face_detection_scale = performance_settings.get('face_detection_scale', 1.1)
+            self.face_detection_min_neighbors = performance_settings.get('face_detection_min_neighbors', 4)
+            
+        except Exception as e:
+            print(f"⚠️ Erro ao carregar configurações: {e}. Usando valores padrão.")
+            # Valores padrão
+            self.recognition_threshold = 0.75
+            self.recognition_cooldown = 5
+            self.camera_fps = 30
+            self.camera_width = 640
+            self.camera_height = 480
+            self.camera_buffer_size = 1
+            self.camera_auto_exposure = 0.25
+            self.processing_interval = 0.1
+            self.face_detection_scale = 1.1
+            self.face_detection_min_neighbors = 4
         
     def extract_face_features(self, face_roi):
         """Extrai características do rosto usando histograma LBP simplificado"""
@@ -126,6 +267,27 @@ class FaceDetector:
             print(f"Erro ao carregar metadados do usuário {user_id}: {e}")
         return None
         
+    def configure_camera(self, cap):
+        """Configura a câmera para melhor performance"""
+        try:
+            # Configurar FPS
+            cap.set(cv2.CAP_PROP_FPS, self.camera_fps)
+            
+            # Configurar buffer para reduzir latência
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, self.camera_buffer_size)
+            
+            # Configurar resolução
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.camera_width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.camera_height)
+            
+            # Configurar exposição automática
+            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, self.camera_auto_exposure)
+            
+            return True
+        except Exception as e:
+            print(f"⚠️ Aviso: Não foi possível configurar todas as propriedades da câmera: {e}")
+            return False
+        
     def check_camera(self):
         """Verifica se a câmera está disponível"""
         # Tentar diferentes índices de câmera
@@ -135,6 +297,8 @@ class FaceDetector:
                 if cap.isOpened():
                     ret, frame = cap.read()
                     if ret and frame is not None:
+                        # Configurar câmera
+                        self.configure_camera(cap)
                         cap.release()
                         print(f"✅ Câmera encontrada no índice {camera_index}")
                         self.camera_index = camera_index
@@ -150,6 +314,8 @@ class FaceDetector:
                 if cap.isOpened():
                     ret, frame = cap.read()
                     if ret and frame is not None:
+                        # Configurar câmera
+                        self.configure_camera(cap)
                         cap.release()
                         print(f"✅ Câmera encontrada com backend {backend}")
                         self.camera_backend = backend
@@ -175,6 +341,9 @@ class FaceDetector:
         if not cap.isOpened():
             print("❌ Erro: Não foi possível acessar a câmera")
             return False
+        
+        # Configurar câmera para melhor performance
+        self.configure_camera(cap)
             
         captured = False
         
@@ -186,7 +355,7 @@ class FaceDetector:
                 
             # Detectar faces no frame
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = self.face_cascade.detectMultiScale(gray, 1.1, 4)
+            faces = self.face_cascade.detectMultiScale(gray, self.face_detection_scale, self.face_detection_min_neighbors)
             
             # Desenhar retângulos ao redor das faces
             for (x, y, w, h) in faces:
@@ -264,77 +433,65 @@ class FaceDetector:
         if not cap.isOpened():
             print("❌ Erro: Não foi possível acessar a câmera")
             return
-            
-        frame_count = 0
         
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("❌ Erro ao capturar frame")
-                break
+        # Configurar câmera para melhor performance
+        self.configure_camera(cap)
+        
+        # Iniciar thread de processamento
+        self.stop_processing = False
+        self.processing_thread = threading.Thread(target=self.process_frames_thread, daemon=True)
+        self.processing_thread.start()
+        
+        print("✅ Thread de processamento iniciada")
+        
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    print("❌ Erro ao capturar frame")
+                    break
                 
-            frame_count += 1
-            
-            # Processar apenas a cada 3 frames para melhor performance
-            if frame_count % 3 == 0:
-                # Detectar faces
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                faces = self.face_cascade.detectMultiScale(gray, 1.1, 4)
+                # Adicionar frame à fila de processamento
+                self.frame_queue.append(frame.copy())
                 
-                # Processar cada face detectada
-                for (x, y, w, h) in faces:
-                    face_roi = gray[y:y+h, x:x+w]
-                    
-                    # Extrair características da face
-                    features = self.extract_face_features(face_roi)
-                    
-                    if features is not None and len(self.known_face_features) > 0:
-                        # Comparar com faces conhecidas
-                        similarities = []
-                        for known_features in self.known_face_features:
-                            similarity = cosine_similarity([features], [known_features])[0][0]
-                            similarities.append(similarity)
+                # Desenhar faces processadas
+                with self.processing_lock:
+                    for face_info in self.processed_faces:
+                        x, y, w, h = face_info['bbox']
+                        color = face_info['color']
+                        name = face_info['name']
+                        similarity = face_info['similarity']
                         
-                        # Encontrar melhor correspondência
-                        best_match_idx = np.argmax(similarities)
-                        best_similarity = similarities[best_match_idx]
+                        # Desenhar retângulo
+                        cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
                         
-                        if best_similarity > self.recognition_threshold:
-                            name = self.known_face_names[best_match_idx]
-                            user_id = self.known_face_ids[best_match_idx]
-                            
-                            # Verificar cooldown
-                            current_time = time.time()
-                            if (user_id not in self.last_recognition_time or 
-                                current_time - self.last_recognition_time[user_id] > self.recognition_cooldown):
-                                
-                                # Registrar presença
-                                self.register_attendance(user_id, name)
-                                self.last_recognition_time[user_id] = current_time
-                            
-                            # Desenhar retângulo verde e nome
-                            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                            cv2.putText(frame, f"{name} ({best_similarity:.2f})", (x, y-10), 
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                        else:
-                            # Face não reconhecida
-                            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 0, 255), 2)
-                            cv2.putText(frame, "Desconhecido", (x, y-10), 
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                    else:
-                        # Só mostrar retângulo
-                        cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
-            
-            # Mostrar frame
-            cv2.imshow('DETFACE - Reconhecimento Facial', frame)
-            
-            # Verificar se usuário quer sair
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+                        # Desenhar texto se houver nome
+                        if name:
+                            if face_info['type'] == 'known':
+                                text = f"{name} ({similarity:.2f})"
+                            else:
+                                text = name
+                            cv2.putText(frame, text, (x, y-10), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                 
-        cap.release()
-        cv2.destroyAllWindows()
-        print("🔚 Reconhecimento finalizado")
+                # Mostrar frame
+                cv2.imshow('DETFACE - Reconhecimento Facial', frame)
+                
+                # Verificar se usuário quer sair
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+                    
+        except KeyboardInterrupt:
+            print("\n⚠️ Interrupção detectada...")
+        finally:
+            # Parar thread de processamento
+            self.stop_processing = True
+            if self.processing_thread and self.processing_thread.is_alive():
+                self.processing_thread.join(timeout=1.0)
+            
+            cap.release()
+            cv2.destroyAllWindows()
+            print("🔚 Reconhecimento finalizado")
     
     def register_attendance(self, user_id, name):
         """Registra a presença do usuário"""

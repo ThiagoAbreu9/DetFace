@@ -11,6 +11,7 @@ from PIL import Image, ImageTk
 import threading
 import time
 import numpy as np
+from collections import deque
 from face_detector import FaceDetector
 from user_manager import UserManager
 from report_generator import ReportGenerator
@@ -38,11 +39,133 @@ class DetfaceDesktopApp:
         self.camera_index = 0
         self.photo_reference = None  # Para manter referência da imagem
         
+        # Referências para fotos dos canvas
+        self.video_photo = None
+        self.register_photo = None
+        
+        # Variáveis para thread de processamento
+        self.processing_thread = None
+        self.stop_processing = False
+        self.frame_queue = deque(maxlen=3)  # Buffer de frames
+        self.processed_faces = []
+        self.processing_lock = threading.Lock()
+        
+        # Variáveis para overlay de reconhecimento
+        self.recognition_overlay = None
+        self.last_recognition_info = ""
+        self.recognition_timer = None
+        
         # Configurar interface
         self.setup_ui()
         
         # Tentar inicializar câmera
         self.init_camera()
+        
+    def process_frames_thread(self):
+        """Thread separada para processar frames e detectar faces"""
+        last_processing_time = time.time()
+        processing_interval = 0.5  # 500ms entre processamentos
+        
+        while not self.stop_processing:
+            try:
+                # Aguardar frame disponível
+                if len(self.frame_queue) == 0:
+                    time.sleep(0.01)  # 10ms
+                    continue
+                
+                current_time = time.time()
+                
+                # Processar apenas em intervalos regulares
+                if current_time - last_processing_time >= processing_interval:
+                    # Pegar frame mais recente
+                    frame = self.frame_queue[-1]
+                    
+                    # Detectar faces
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    faces = self.face_detector.face_cascade.detectMultiScale(gray, 1.2, 5)
+                    
+                    # Processar cada face detectada
+                    processed_faces = []
+                    for (x, y, w, h) in faces:
+                        face_roi = gray[y:y+h, x:x+w]
+                        
+                        # Extrair características da face
+                        features = self.face_detector.extract_face_features(face_roi)
+                        
+                        if features is not None and len(self.face_detector.known_face_features) > 0:
+                            # Comparar com faces conhecidas
+                            from sklearn.metrics.pairwise import cosine_similarity
+                            similarities = []
+                            for known_features in self.face_detector.known_face_features:
+                                similarity = cosine_similarity([features], [known_features])[0][0]
+                                similarities.append(similarity)
+                            
+                            # Encontrar melhor correspondência
+                            best_match_idx = np.argmax(similarities)
+                            best_similarity = similarities[best_match_idx]
+                            
+                            if best_similarity > self.face_detector.recognition_threshold:
+                                name = self.face_detector.known_face_names[best_match_idx]
+                                user_id = self.face_detector.known_face_ids[best_match_idx]
+                                
+                                # Verificar cooldown
+                                if (user_id not in self.face_detector.last_recognition_time or 
+                                    current_time - self.face_detector.last_recognition_time[user_id] > 
+                                    self.face_detector.recognition_cooldown):
+                                    
+                                    # Registrar presença
+                                    self.face_detector.register_attendance(user_id, name)
+                                    self.face_detector.last_recognition_time[user_id] = current_time
+                                    
+                                    # Determinar tipo de entrada/saída
+                                    attendance_type = self.face_detector.determine_attendance_type(user_id, datetime.now())
+                                    
+                                    # Atualizar log na thread principal
+                                    self.root.after(0, lambda: self.add_to_recognition_log(f"✅ {attendance_type.upper()}: {name} ({best_similarity:.2f})"))
+                                    self.root.after(0, self.update_statistics)
+                                    
+                                    # Mostrar overlay de reconhecimento
+                                    overlay_message = f"✅ {attendance_type.upper()}: {name}"
+                                    self.root.after(0, lambda: self.show_recognition_overlay(overlay_message, 3))
+                                
+                                # Armazenar dados da face
+                                processed_faces.append({
+                                    'bbox': (x, y, w, h),
+                                    'name': name,
+                                    'similarity': best_similarity,
+                                    'color': (0, 255, 0),
+                                    'type': 'known'
+                                })
+                            else:
+                                # Face não reconhecida
+                                processed_faces.append({
+                                    'bbox': (x, y, w, h),
+                                    'name': 'Desconhecido',
+                                    'similarity': best_similarity,
+                                    'color': (0, 0, 255),
+                                    'type': 'unknown'
+                                })
+                        else:
+                            # Só mostrar retângulo
+                            processed_faces.append({
+                                'bbox': (x, y, w, h),
+                                'name': '',
+                                'similarity': 0,
+                                'color': (255, 0, 0),
+                                'type': 'detected'
+                            })
+                    
+                    # Atualizar faces processadas
+                    with self.processing_lock:
+                        self.processed_faces = processed_faces
+                    
+                    last_processing_time = current_time
+                else:
+                    time.sleep(0.01)  # 10ms
+                    
+            except Exception as e:
+                print(f"Erro na thread de processamento: {e}")
+                time.sleep(0.1)
         
     def setup_ui(self):
         """Configura a interface principal"""
@@ -316,10 +439,6 @@ class DetfaceDesktopApp:
         
         ttk.Button(options_frame, text="📅 Relatório de Hoje", 
                   command=self.generate_daily_report, width=25).pack(fill=tk.X, pady=2)
-        ttk.Button(options_frame, text="📊 Relatório Semanal", 
-                  command=self.generate_weekly_report, width=25).pack(fill=tk.X, pady=2)
-        ttk.Button(options_frame, text="📈 Relatório Mensal", 
-                  command=self.generate_monthly_report, width=25).pack(fill=tk.X, pady=2)
         
         # Separador
         ttk.Separator(options_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=15)
@@ -380,6 +499,13 @@ class DetfaceDesktopApp:
         try:
             self.camera = cv2.VideoCapture(self.camera_index)
             if self.camera.isOpened():
+                # Configurar câmera para melhor performance
+                self.camera.set(cv2.CAP_PROP_FPS, 30)
+                self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+                
                 self.is_capturing = True
                 self.start_camera_btn.config(state=tk.DISABLED)
                 self.stop_camera_btn.config(state=tk.NORMAL)
@@ -390,6 +516,9 @@ class DetfaceDesktopApp:
                 # Iniciar thread de captura
                 self.capture_thread = threading.Thread(target=self.capture_loop, daemon=True)
                 self.capture_thread.start()
+                
+                # Iniciar atualização de display
+                self.update_display()
                 
                 self.update_status("Câmera iniciada com sucesso")
                 self.add_to_recognition_log("📹 Câmera iniciada")
@@ -402,6 +531,11 @@ class DetfaceDesktopApp:
         """Para a captura da câmera"""
         self.is_capturing = False
         self.is_recognizing = False
+        
+        # Parar thread de processamento
+        self.stop_processing = True
+        if self.processing_thread and self.processing_thread.is_alive():
+            self.processing_thread.join(timeout=1.0)
         
         if self.camera:
             self.camera.release()
@@ -421,6 +555,9 @@ class DetfaceDesktopApp:
         self.register_canvas.delete("all")
         self.register_canvas.create_text(240, 180, text="Câmera Parada", fill="white", font=("Arial", 14))
         
+        # Limpar overlay
+        self.clear_recognition_overlay()
+        
         self.update_status("Câmera parada")
         self.add_to_recognition_log("⏹️ Câmera parada")
         
@@ -431,14 +568,11 @@ class DetfaceDesktopApp:
             if ret:
                 self.current_frame = frame.copy()
                 
-                # Processar reconhecimento se ativo
-                display_frame = frame.copy()
+                # Adicionar frame à fila de processamento (apenas se reconhecimento ativo)
                 if self.is_recognizing:
-                    display_frame = self.process_recognition(display_frame)
+                    self.frame_queue.append(frame.copy())
                 
-                # Exibir nos canvas
-                self.display_frame_on_canvas(display_frame, self.video_canvas, (640, 480))
-                self.display_frame_on_canvas(frame, self.register_canvas, (480, 360))
+
                 
             time.sleep(0.03)  # ~30 FPS
 
@@ -453,72 +587,63 @@ class DetfaceDesktopApp:
             image = Image.fromarray(frame_rgb)
             photo = ImageTk.PhotoImage(image)
             
-            # Atualizar canvas
+            # Atualizar canvas de forma mais eficiente
             canvas.delete("all")
             canvas.create_image(size[0]//2, size[1]//2, image=photo)
             
             # Manter referência para evitar garbage collection
-            self.photo_reference = photo
+            if canvas == self.video_canvas:
+                self.video_photo = photo
+            elif canvas == self.register_canvas:
+                self.register_photo = photo
             
         except Exception as e:
             print(f"Erro ao exibir frame: {e}")
 
-    def process_recognition(self, frame):
-        """Processa reconhecimento facial no frame"""
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = self.face_detector.face_cascade.detectMultiScale(gray, 1.1, 4)
+
         
-        for (x, y, w, h) in faces:
-            face_roi = gray[y:y+h, x:x+w]
-            features = self.face_detector.extract_face_features(face_roi)
+    def show_recognition_overlay(self, message, duration=3):
+        """Mostra overlay de reconhecimento na interface"""
+        # Cancelar timer anterior se existir
+        if self.recognition_timer:
+            self.root.after_cancel(self.recognition_timer)
+        
+        # Criar overlay na interface
+        if hasattr(self, 'video_canvas'):
+            # Limpar overlay anterior
+            self.video_canvas.delete("overlay")
             
-            if features is not None and len(self.face_detector.known_face_features) > 0:
-                from sklearn.metrics.pairwise import cosine_similarity
-                similarities = []
-                for known_features in self.face_detector.known_face_features:
-                    similarity = cosine_similarity([features], [known_features])[0][0]
-                    similarities.append(similarity)
-                
-                best_match_idx = np.argmax(similarities)
-                best_similarity = similarities[best_match_idx]
-                
-                if best_similarity > self.face_detector.recognition_threshold:
-                    name = self.face_detector.known_face_names[best_match_idx]
-                    user_id = self.face_detector.known_face_ids[best_match_idx]
-                    
-                    # Verificar cooldown
-                    current_time = time.time()
-                    if (user_id not in self.face_detector.last_recognition_time or 
-                        current_time - self.face_detector.last_recognition_time[user_id] > 
-                        self.face_detector.recognition_cooldown):
-                        
-                        # Registrar presença
-                        self.face_detector.register_attendance(user_id, name)
-                        self.face_detector.last_recognition_time[user_id] = current_time
-                        
-                        # Determinar tipo de entrada/saída
-                        attendance_type = self.face_detector.determine_attendance_type(user_id, datetime.now())
-                        
-                        # Atualizar log
-                        self.add_to_recognition_log(f"✅ {attendance_type.upper()}: {name} ({best_similarity:.2f})")
-                        self.update_statistics()
-                    
-                    # Desenhar retângulo verde
-                    cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                    cv2.putText(frame, f"{name} ({best_similarity:.2f})", (x, y-10), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                else:
-                    # Face não reconhecida
-                    cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 0, 255), 2)
-                    cv2.putText(frame, f"Desconhecido ({best_similarity:.2f})", (x, y-10), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-            else:
-                # Apenas mostrar retângulo
-                cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
-                cv2.putText(frame, "Processando...", (x, y-10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-                
-        return frame
+            # Criar novo overlay
+            self.video_canvas.create_text(
+                320, 50,  # Posição no topo
+                text=message,
+                fill="lime",
+                font=("Arial", 14, "bold"),
+                tags="overlay"
+            )
+            
+            # Configurar timer para remover overlay
+            self.recognition_timer = self.root.after(duration * 1000, self.clear_recognition_overlay)
+    
+    def clear_recognition_overlay(self):
+        """Remove overlay de reconhecimento"""
+        if hasattr(self, 'video_canvas'):
+            self.video_canvas.delete("overlay")
+        self.recognition_timer = None
+        
+    def update_display(self):
+        """Atualiza o display periodicamente"""
+        if self.is_capturing and self.current_frame is not None:
+            try:
+                # Exibir frame limpo
+                self.display_frame_on_canvas(self.current_frame, self.video_canvas, (640, 480))
+                self.display_frame_on_canvas(self.current_frame, self.register_canvas, (480, 360))
+            except Exception as e:
+                print(f"Erro ao atualizar display: {e}")
+        
+        # Agendar próxima atualização
+        if self.is_capturing:
+            self.root.after(33, self.update_display)  # ~30 FPS
         
     def toggle_recognition(self):
         """Liga/desliga reconhecimento"""
@@ -528,12 +653,22 @@ class DetfaceDesktopApp:
             self.recognition_status.set("🔴 Ativo")
             self.update_status("Reconhecimento facial ativo")
             self.add_to_recognition_log("🎯 Reconhecimento iniciado")
+            
+            # Iniciar thread de processamento
+            self.stop_processing = False
+            self.processing_thread = threading.Thread(target=self.process_frames_thread, daemon=True)
+            self.processing_thread.start()
         else:
             self.is_recognizing = False
             self.recognize_btn.config(text="🎯 Iniciar Reconhecimento")
             self.recognition_status.set("⚫ Parado")
             self.update_status("Reconhecimento facial parado")
             self.add_to_recognition_log("⏸️ Reconhecimento parado")
+            
+            # Parar thread de processamento
+            self.stop_processing = True
+            if self.processing_thread and self.processing_thread.is_alive():
+                self.processing_thread.join(timeout=1.0)
             
     def capture_for_registration(self):
         """Captura frame para cadastro"""
@@ -688,7 +823,7 @@ class DetfaceDesktopApp:
             return
             
         item = self.users_tree.item(selection[0])
-        user_id = item['values'][0]
+        user_id = str(item['values'][0])  # Converter para string
         
         # Criar janela de detalhes
         self.show_user_details_window(user_id)
@@ -696,8 +831,9 @@ class DetfaceDesktopApp:
     def show_user_details_window(self, user_id):
         """Mostra janela com detalhes do usuário"""
         user_data = self.user_manager.get_user(user_id)
+        
         if not user_data:
-            messagebox.showerror("Erro", "Usuário não encontrado!")
+            messagebox.showerror("Erro", f"Usuário com ID '{user_id}' não encontrado!")
             return
         
         # Criar janela
@@ -786,15 +922,16 @@ class DetfaceDesktopApp:
             return
             
         item = self.users_tree.item(selection[0])
-        user_id = item['values'][0]
+        user_id = str(item['values'][0])  # Converter para string
         
         self.show_edit_user_window(user_id)
 
     def show_edit_user_window(self, user_id):
         """Mostra janela de edição do usuário"""
         user_data = self.user_manager.get_user(user_id)
+        
         if not user_data:
-            messagebox.showerror("Erro", "Usuário não encontrado!")
+            messagebox.showerror("Erro", f"Usuário com ID '{user_id}' não encontrado!")
             return
         
         # Criar janela
@@ -840,12 +977,15 @@ class DetfaceDesktopApp:
                 if new_position:
                     update_data['position'] = new_position
                 
-                self.user_manager.update_user(user_id, **update_data)
-                self.face_detector.load_known_faces()  # Recarregar nomes
+                success = self.user_manager.update_user(user_id, **update_data)
                 
-                messagebox.showinfo("Sucesso", "Usuário atualizado com sucesso!")
-                edit_window.destroy()
-                self.refresh_users_list()
+                if success:
+                    self.face_detector.load_known_faces()  # Recarregar nomes
+                    messagebox.showinfo("Sucesso", "Usuário atualizado com sucesso!")
+                    edit_window.destroy()
+                    self.refresh_users_list()
+                else:
+                    messagebox.showerror("Erro", "Falha ao atualizar usuário!")
                 
             except Exception as e:
                 messagebox.showerror("Erro", f"Erro ao atualizar usuário: {str(e)}")
@@ -865,7 +1005,7 @@ class DetfaceDesktopApp:
             return
             
         item = self.users_tree.item(selection[0])
-        user_id = item['values'][0]
+        user_id = str(item['values'][0])  # Converter para string
         user_name = item['values'][1]
         
         # Confirmar exclusão
@@ -877,13 +1017,17 @@ class DetfaceDesktopApp:
                               f"- Não afetará o histórico de registros"):
             
             try:
-                self.user_manager.remove_user(user_id)
-                self.face_detector.load_known_faces()
-                self.refresh_users_list()
-                self.update_statistics()
+                success = self.user_manager.remove_user(user_id)
                 
-                messagebox.showinfo("Sucesso", f"Usuário '{user_name}' excluído com sucesso!")
-                self.add_to_recognition_log(f"🗑️ Usuário excluído: {user_name}")
+                if success:
+                    self.face_detector.load_known_faces()
+                    self.refresh_users_list()
+                    self.update_statistics()
+                    
+                    messagebox.showinfo("Sucesso", f"Usuário '{user_name}' excluído com sucesso!")
+                    self.add_to_recognition_log(f"🗑️ Usuário excluído: {user_name}")
+                else:
+                    messagebox.showerror("Erro", "Falha ao excluir usuário!")
                 
             except Exception as e:
                 messagebox.showerror("Erro", f"Erro ao excluir usuário: {str(e)}")

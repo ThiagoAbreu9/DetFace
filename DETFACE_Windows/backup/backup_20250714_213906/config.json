@@ -14,7 +14,7 @@
         "auto_exposure": 0.25
     },
     "performance": {
-        "processing_interval": 0.5,
+        "processing_interval": 0.3,
         "face_detection_scale": 1.2,
         "face_detection_min_neighbors": 5,
         "recognition_cooldown": 5
